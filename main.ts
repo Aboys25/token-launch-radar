@@ -98,6 +98,7 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: base multiple ${radar.model.base_multiple} calibrated from ${radar.calibration.live_protocols} live-token protocols; unknown age ${radar.model.unknown_age_days} days from ${radar.calibration.known_age_protocols} dated protocols\n` +
+    `token radar: curve ln(mcap) = ${radar.model.curve_intercept.toFixed(4)} + ${radar.model.curve_slope.toFixed(4)} ln(TVL) fitted on ${radar.calibration.comps} traded comps; band x${radar.model.band_factor} from leave-one-out (median miss, ${radar.calibration.validation.loo_n} refits)\n` +
+    `token radar: audit: ${radar.audit.pre_token} record no token, ${radar.audit.set_aside} set aside (${radar.audit.set_aside_category} category, ${radar.audit.set_aside_versioned} versioned, ${radar.audit.set_aside_name} name, ${radar.audit.set_aside_exchange} exchange)\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashboardFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
