@@ -7,15 +7,16 @@
 // token at all (no market cap, no CoinGecko id, no symbol), and rankable only
 // when it is not a wrapped, staked or bridged product of a token that already
 // trades, by the same rule the house used to draw the watchlist. The protocols
-// whose token already trades are kept apart and shown with the market's own
+// whose token already trades are kept apart: they calibrate the model as
+// comps, and the dashboard shows the largest of them with the market's own
 // values, never mixed into the ranking.
 //
-// The value model itself lives in dashboard/model.ts's sibling file model.js,
-// shared with the page, so the number board.json carries and the number the page
-// recomputes are the same arithmetic. The farm plans live in dashboard/plan.js
-// the same way. What this file adds is the snapshot's parsing, the calibration
-// of the model's constants from the snapshot's own live-token protocols, the
-// board's assembly, and the gate's own checks run before anything is written.
+// The value model itself lives in dashboard/model.js, shared with the page, so
+// the number board.json carries and the number the page recomputes are the
+// same arithmetic; the farm plans live in dashboard/plan.js the same way.
+// What this file adds is the snapshot's parsing, the comps set, the curve fit
+// and its blind tests run at run time, the board's assembly, the audit of the
+// pre-token universe, and the gate's own checks run before anything is written.
 
 import modelJs from '../dashboard/model.js';
 import planJs from '../dashboard/plan.js';
@@ -43,9 +44,23 @@ export interface Snapshot {
   watchlist: string[];
 }
 
+/** One traded protocol the curve is fitted on: the figures the fit and its tests read. */
+export interface CompRow {
+  slug: string;
+  category: string | null;
+  tvl_usd: number;
+  mcap_usd: number;
+  change_7d: number | null;
+  age_days: number | null;
+  listed_at: string | null;
+}
+
 /** The value model's constants, as the dashboard states them. */
 export interface ModelConstants {
-  base_multiple: number;
+  curve_intercept: number;
+  curve_slope: number;
+  category: Record<string, number>;
+  shrink_k: number;
   growth_weight: number;
   growth_floor: number;
   growth_cap: number;
@@ -53,18 +68,48 @@ export interface ModelConstants {
   maturity_range: number;
   maturity_days: number;
   unknown_age_days: number;
+  band_factor: number;
+}
+
+/** The blind tests' results, for the model panel. */
+export interface Validation {
+  loo_n: number;
+  loo_median_factor: number;
+  loo_p80_factor: number;
+  loo_within_2x: number;
+  split_train: number;
+  split_test: number;
+  split_median_factor: number;
+  split_flat_factor: number;
+  boot_rounds: number;
+  boot_slope_p10: number;
+  boot_slope_p50: number;
+  boot_slope_p90: number;
 }
 
 /** How the constants were calibrated from this snapshot, for the model panel. */
 export interface Calibration {
-  live_protocols: number;
-  median_mcap_tvl: number;
-  known_age_protocols: number;
+  comps: number;
   median_age_days: number;
+  known_age_protocols: number;
+  validation: Validation;
+}
+
+/** The audit of the pre-token universe: what was ranked and what was set aside, and why. */
+export interface Audit {
+  protocols: number;
+  pre_token: number;
+  live_token: number;
+  ranked: number;
+  set_aside: number;
+  set_aside_category: number;
+  set_aside_versioned: number;
+  set_aside_name: number;
+  set_aside_exchange: number;
 }
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** The growth and maturity weights: fixed, stated, and the same for every row. */
 const GROWTH_WEIGHT = 0.5;
@@ -73,6 +118,11 @@ const GROWTH_CAP = 120;
 const MATURITY_FLOOR = 0.6;
 const MATURITY_RANGE = 0.4;
 const MATURITY_DAYS = 1095;
+/** The category yardstick's shrinkage: a category's pull is n/(n+k). */
+const SHRINK_K = 10;
+/** Bootstrap rounds for the slope stability check (fixed seed: deterministic). */
+const BOOT_ROUNDS = 200;
+const BOOT_SEED = 20261114;
 
 /** How many live-token protocols the dashboard's Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -94,8 +144,13 @@ export interface BoardRow {
   on_watchlist: boolean;
   age_days: number | null;
   implied_value_usd: number;
+  low_usd: number;
+  high_usd: number;
+  verdict: string;
+  plan_cost_usd: number;
   model: {
-    base_multiple: number;
+    curve_usd: number;
+    category_multiplier: number;
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
@@ -118,6 +173,10 @@ export interface RadarRow {
   on_watchlist: boolean;
   age_days: number | null;
   implied_value_usd: number;
+  low_usd: number;
+  high_usd: number;
+  verdict: string;
+  plan_cost_usd: number;
   growth_multiplier: number;
   maturity_multiplier: number;
 }
@@ -133,13 +192,14 @@ export interface LiveRow {
   change_7d: number | null;
 }
 
-/** Everything the dashboard needs: the board, the live set, and the model it runs. */
+/** Everything the dashboard needs: the board, the live set, the model it runs, and the audit. */
 export interface RadarData {
   as_of: string;
   source: string;
   floor_usd: number;
   model: ModelConstants;
   calibration: Calibration;
+  audit: Audit;
   model_version: string;
   watchlist_size: number;
   board_size: number;
@@ -188,54 +248,133 @@ export function isPreToken(p: SnapshotProtocol): boolean {
   return p.mcap_usd === null && p.gecko_id === null && p.symbol === null;
 }
 
+/** Why a protocol is set aside, in the rule's own order, or null when it is rankable. */
+export function setAsideReason(p: SnapshotProtocol): 'category' | 'versioned' | 'name' | 'exchange' | null {
+  if (WRAPPED_CATEGORIES.has(p.category ?? '')) return 'category';
+  if (VERSIONED.test(p.name)) return 'versioned';
+  if (WRAPPED_WORD.test(p.name)) return 'name';
+  if (EXCHANGE_PREFIX.test(p.name)) return 'exchange';
+  return null;
+}
+
 /** Whether a protocol is one the board may rank: pre-token, not a wrapped or staked product, not an exchange, not a versioned pool. */
 export function isRankable(p: SnapshotProtocol): boolean {
-  return (
-    isPreToken(p) &&
-    !WRAPPED_CATEGORIES.has(p.category ?? '') &&
-    !VERSIONED.test(p.name) &&
-    !WRAPPED_WORD.test(p.name) &&
-    !EXCHANGE_PREFIX.test(p.name)
-  );
+  return isPreToken(p) && setAsideReason(p) === null;
 }
 
 /**
- * Calibrate the model's constants from the snapshot itself. The base multiple is
- * the median market-cap-to-TVL ratio of the protocols whose token already trades
- * (a market fact, not a chosen number); the unknown-age fallback is the median
- * age of the protocols with a listing date. Both are computed here, at run time,
- * from the sealed input, and shipped to the dashboard in data.js.
+ * The comps: the protocols whose token already trades and that resemble the
+ * ranked set — no CEX, no wrapped/staked/bridged category, no versioned pool
+ * — with a market cap and a TVL to fit on. The curve is fitted on these alone.
+ */
+export function compsOf(snapshot: Snapshot): CompRow[] {
+  return snapshot.protocols
+    .filter((p) => !isPreToken(p) && setAsideReason(p) === null && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0)
+    .map((p) => ({
+      slug: p.slug,
+      category: p.category,
+      tvl_usd: p.tvl_usd,
+      mcap_usd: p.mcap_usd!,
+      change_7d: p.change_7d,
+      age_days: modelJs.ageDays(snapshot.as_of, p.listed_at),
+      listed_at: p.listed_at,
+    }));
+}
+
+/**
+ * Calibrate the model's constants from the snapshot itself: fit the comps
+ * curve, shrink the category yardsticks, run the blind tests, and take the
+ * band from the leave-one-out median miss. The unknown-age fallback is the
+ * median age of the protocols with a listing date. Everything is computed
+ * here, at run time, from the sealed input, and shipped to the dashboard in
+ * data.js. With too few comps to fit, the curve falls back to a flat 0.25
+ * multiple and a x3 band, stated in the code rather than hidden.
  */
 export function calibrate(snapshot: Snapshot): { constants: ModelConstants; calibration: Calibration } {
-  const ratios = snapshot.protocols
-    .filter((p) => !isPreToken(p) && p.category !== 'CEX' && !VERSIONED.test(p.name))
-    .filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0)
-    .map((p) => p.mcap_usd! / p.tvl_usd)
-    .sort((a, b) => a - b);
-  const baseMultiple = ratios.length > 0 ? median(ratios) : 0.25;
+  const comps = compsOf(snapshot);
   const ages = snapshot.protocols
     .map((p) => modelJs.ageDays(snapshot.as_of, p.listed_at))
     .filter((a): a is number => a !== null)
     .sort((a, b) => a - b);
   const medianAge = ages.length > 0 ? Math.round(median(ages)) : 365;
+  const tilt = {
+    growth_weight: GROWTH_WEIGHT,
+    growth_floor: GROWTH_FLOOR,
+    growth_cap: GROWTH_CAP,
+    maturity_floor: MATURITY_FLOOR,
+    maturity_range: MATURITY_RANGE,
+    maturity_days: MATURITY_DAYS,
+    unknown_age_days: medianAge,
+    shrink_k: SHRINK_K,
+  };
+  if (comps.length < 10) {
+    const fallback: Validation = {
+      loo_n: comps.length, loo_median_factor: 3, loo_p80_factor: 3, loo_within_2x: 0,
+      split_train: 0, split_test: 0, split_median_factor: 0, split_flat_factor: 0,
+      boot_rounds: 0, boot_slope_p10: 1, boot_slope_p50: 1, boot_slope_p90: 1,
+    };
+    return {
+      constants: { curve_intercept: Math.log(0.25), curve_slope: 1, category: {}, ...tilt, band_factor: 3 },
+      calibration: { comps: comps.length, median_age_days: medianAge, known_age_protocols: ages.length, validation: fallback },
+    };
+  }
+  const fit = modelJs.fitCurve(comps);
+  const adjustments = modelJs.categoryAdjustments(comps, fit, SHRINK_K);
+  const loo = modelJs.looValidate(comps, tilt);
+  const split = modelJs.timeSplitValidate(comps, tilt);
+  const boot = modelJs.bootstrapSlope(comps, BOOT_ROUNDS, BOOT_SEED);
+  const validation: Validation = {
+    loo_n: loo.n,
+    loo_median_factor: loo.median_factor,
+    loo_p80_factor: loo.p80_factor,
+    loo_within_2x: loo.within_2x,
+    split_train: split.train,
+    split_test: split.test,
+    split_median_factor: split.median_factor,
+    split_flat_factor: split.flat_factor,
+    boot_rounds: boot.rounds,
+    boot_slope_p10: boot.slope_p10,
+    boot_slope_p50: boot.slope_p50,
+    boot_slope_p90: boot.slope_p90,
+  };
   return {
     constants: {
-      base_multiple: baseMultiple,
-      growth_weight: GROWTH_WEIGHT,
-      growth_floor: GROWTH_FLOOR,
-      growth_cap: GROWTH_CAP,
-      maturity_floor: MATURITY_FLOOR,
-      maturity_range: MATURITY_RANGE,
-      maturity_days: MATURITY_DAYS,
-      unknown_age_days: medianAge,
+      curve_intercept: fit.intercept,
+      curve_slope: fit.slope,
+      category: adjustments,
+      ...tilt,
+      band_factor: loo.median_factor > 1 ? loo.median_factor : 1,
     },
-    calibration: {
-      live_protocols: ratios.length,
-      median_mcap_tvl: baseMultiple,
-      known_age_protocols: ages.length,
-      median_age_days: medianAge,
-    },
+    calibration: { comps: comps.length, median_age_days: medianAge, known_age_protocols: ages.length, validation },
   };
+}
+
+/** The audit of the pre-token universe, from the snapshot and the board. */
+export function auditOf(snapshot: Snapshot, board: BoardRow[]): Audit {
+  const ranked = new Set(board.map((r) => r.slug));
+  const audit: Audit = {
+    protocols: snapshot.protocols.length,
+    pre_token: 0,
+    live_token: 0,
+    ranked: board.length,
+    set_aside: 0,
+    set_aside_category: 0,
+    set_aside_versioned: 0,
+    set_aside_name: 0,
+    set_aside_exchange: 0,
+  };
+  for (const p of snapshot.protocols) {
+    if (!isPreToken(p)) { audit.live_token++; continue; }
+    audit.pre_token++;
+    if (ranked.has(p.slug)) continue;
+    audit.set_aside++;
+    const reason = setAsideReason(p);
+    if (reason === 'category') audit.set_aside_category++;
+    else if (reason === 'versioned') audit.set_aside_versioned++;
+    else if (reason === 'name') audit.set_aside_name++;
+    else if (reason === 'exchange') audit.set_aside_exchange++;
+  }
+  return audit;
 }
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
@@ -244,8 +383,12 @@ export function buildBoard(snapshot: Snapshot, constants: ModelConstants): Board
   const chosen = snapshot.protocols.filter((p) => watchlist.has(p.slug) || isRankable(p));
   const scored = chosen.map((p) => {
     const age = modelJs.ageDays(snapshot.as_of, p.listed_at);
-    const scored = modelJs.impliedValue({ tvl_usd: p.tvl_usd, change_7d: p.change_7d, age_days: age }, constants);
-    return { p, age, scored };
+    const scored = modelJs.impliedValue({ tvl_usd: p.tvl_usd, change_7d: p.change_7d, age_days: age, category: p.category }, constants);
+    const econ = planJs.planEconomics(
+      { name: p.name, category: p.category, chains: p.chains, tvl_usd: p.tvl_usd, age_days: age },
+      scored.low_usd,
+    );
+    return { p, age, scored, econ };
   });
   scored.sort((a, b) => b.scored.implied_value_usd - a.scored.implied_value_usd || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -264,8 +407,13 @@ export function buildBoard(snapshot: Snapshot, constants: ModelConstants): Board
     on_watchlist: watchlist.has(s.p.slug),
     age_days: s.age,
     implied_value_usd: s.scored.implied_value_usd,
+    low_usd: s.scored.low_usd,
+    high_usd: s.scored.high_usd,
+    verdict: s.econ.verdict,
+    plan_cost_usd: s.econ.gas_usd,
     model: {
-      base_multiple: constants.base_multiple,
+      curve_usd: s.scored.curve_usd,
+      category_multiplier: s.scored.category_multiplier,
       growth_pct: s.scored.growth_pct,
       growth_multiplier: s.scored.growth_multiplier,
       maturity_multiplier: s.scored.maturity_multiplier,
@@ -277,6 +425,7 @@ export function buildBoard(snapshot: Snapshot, constants: ModelConstants): Board
       chains: s.p.chains,
       tvl_usd: s.p.tvl_usd,
       age_days: s.age,
+      low_usd: s.scored.low_usd,
     }),
   }));
 }
@@ -303,6 +452,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   const { constants, calibration } = calibrate(snapshot);
   const board = buildBoard(snapshot, constants);
   const live = liveRows(snapshot);
+  const audit = auditOf(snapshot, board);
   const early = board.filter((r) => !r.on_watchlist).length;
   const radar: RadarData = {
     as_of: snapshot.as_of,
@@ -310,6 +460,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     floor_usd: snapshot.floor_usd,
     model: constants,
     calibration,
+    audit,
     model_version: MODEL_VERSION,
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
@@ -328,6 +479,10 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       on_watchlist: row.on_watchlist,
       age_days: row.age_days,
       implied_value_usd: row.implied_value_usd,
+      low_usd: row.low_usd,
+      high_usd: row.high_usd,
+      verdict: row.verdict,
+      plan_cost_usd: row.plan_cost_usd,
       growth_multiplier: row.model.growth_multiplier,
       maturity_multiplier: row.model.maturity_multiplier,
     })),
