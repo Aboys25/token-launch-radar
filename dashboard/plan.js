@@ -1,12 +1,15 @@
 // The farm-plan generator, shared by main.ts and the dashboard page.
 //
-// Every board row carries a plan of six steps, each an action with what it costs
-// and how long it takes. The plan is derived from the protocol's own record only:
-// its category decides the action, its first chain decides the gas tier, its TVL
-// decides the capital, and its age decides the hold. No protocol name is ever
-// special-cased. main.ts writes these same strings to board.json, and the page
-// generates them from the same row data, so the plan a screenshot shows is the
-// plan the board carries.
+// Every board row carries a plan of seven steps, each an action with what it
+// costs and how long it takes, derived from the protocol's own record only:
+// its category decides the action, its first chain the gas tier, its TVL the
+// capital, its age the hold. No name is ever special-cased. main.ts writes
+// these same strings to board.json, and the page generates them from the
+// same row data, so the plan a screenshot shows is the plan the board
+// carries. The seventh step nets the plan: the low-end value times a stated
+// 10% farmer share, against the whole gas bill, gives the farmers covered
+// and the verdict — FARM, THIN or SKIP. The 10% is an assumption, labelled
+// as one wherever it appears, never a fact about the protocol.
 //
 // Loaded two ways: as a classic script it sets window.RadarPlan; required from
 // Node (main.ts imports it) it exports the same object. No imports, no network.
@@ -40,6 +43,44 @@
     if (tier === 'high') return 'about $6 of gas';
     if (tier === 'low') return 'under $0.50 of gas';
     return 'about $2 of gas';
+  }
+
+  /** The dollars one transaction costs on a gas tier. */
+  function gasUsd(tier) {
+    if (tier === 'high') return 6;
+    if (tier === 'low') return 0.5;
+    return 2;
+  }
+
+  /** The share of a launch's value assumed to reach farmers: an assumption, stated wherever it is used. */
+  var FARMER_SHARE = 0.1;
+
+  /** Compact dollars: $1.2M, $340K, $45. */
+  function fmtUsd(n) {
+    if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
+    if (n >= 1e6) return '$' + (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return '$' + Math.round(n / 1e3) + 'K';
+    return '$' + Math.round(n);
+  }
+
+  /**
+   * The plan's economics, netted: the whole gas bill (one setup, one action,
+   * one a week across the hold, one claim) against the farmer pool at
+   * the band's low end. `lowUsd` is the row's low-end implied value. Returns
+   * the gas, the capital held, the hold, the pool, the farmers covered, and
+   * the verdict: FARM when the launch covers at least fifty thousand farmers
+   * at this cost, THIN at five thousand, SKIP below that.
+   */
+  function planEconomics(row, lowUsd) {
+    var tier = gasTier(chainOf(row));
+    var capital = capitalFor(row.tvl_usd);
+    var hold = holdDaysFor(row.age_days);
+    var txs = 3 + Math.ceil(hold / 7);
+    var gas = gasUsd(tier) * txs;
+    var pool = Math.max(0, (lowUsd || 0) * FARMER_SHARE);
+    var farmers = gas > 0 ? Math.floor(pool / gas) : 0;
+    var verdict = farmers >= 50000 ? 'FARM' : farmers >= 5000 ? 'THIN' : 'SKIP';
+    return { gas_usd: gas, tx_count: txs, capital_usd: capital, hold_days: hold, pool_usd: Math.round(pool), farmers: farmers, verdict: verdict };
   }
 
   /** How much capital one farm position needs, from the protocol's own TVL. */
@@ -133,15 +174,17 @@
   }
 
   /**
-   * A protocol's farm plan: six steps, each an action with a cost and a time.
-   * `row` carries name, category, chains, tvl_usd and age_days.
+   * A protocol's farm plan: six action steps plus the netting step, each an
+   * action with a cost and a time. `row` carries name, category, chains,
+   * tvl_usd, age_days and low_usd (the band's low end; without it the plan
+   * carries the six action steps only).
    */
   function buildFarmSteps(row) {
     var chain = chainOf(row);
     var tier = gasTier(chain);
     var capital = capitalFor(row.tvl_usd);
     var hold = holdDaysFor(row.age_days);
-    return [
+    var steps = [
       stepText(
         'Open a fresh wallet that holds only the funds you plan to farm, and store its seed phrase offline, never in a screenshot or chat.',
         gasText(tier) + ' for the first transaction',
@@ -164,7 +207,7 @@
       ),
       stepText(
         "Before withdrawing, open the protocol's own points or rewards page from its official site and claim only from the link it publishes; never pay anyone to claim for you.",
-        'no fee to check, and never pay to claim',
+        'no fee to check; ' + gasText(tier) + ' to claim',
         '10 minutes'
       ),
       stepText(
@@ -173,9 +216,20 @@
         '5 minutes'
       ),
     ];
+    if (typeof row.low_usd === 'number' && isFinite(row.low_usd)) {
+      var econ = planEconomics(row, row.low_usd);
+      steps.push(stepText(
+        'Net the plan: at the band\u2019s low end of ' + fmtUsd(row.low_usd) + ', a 10% farmer share (an assumption) is ' + fmtUsd(econ.pool_usd) +
+          ', against $' + econ.gas_usd + ' of gas over ' + econ.tx_count + ' transactions, so the launch covers about ' +
+          econ.farmers.toLocaleString('en-US') + ' farmers at this cost: ' + econ.verdict + '.',
+        '$' + econ.gas_usd + ' of gas in all, $' + econ.capital_usd + ' of capital held',
+        econ.hold_days + ' days of holding'
+      ));
+    }
+    return steps;
   }
 
-  var api = { buildFarmSteps: buildFarmSteps, capitalFor: capitalFor, holdDaysFor: holdDaysFor, gasTier: gasTier };
+  var api = { buildFarmSteps: buildFarmSteps, planEconomics: planEconomics, capitalFor: capitalFor, holdDaysFor: holdDaysFor, gasTier: gasTier, farmerShare: FARMER_SHARE };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.RadarPlan = api;
