@@ -140,7 +140,7 @@ export interface BoardRow {
   listed_at: string | null;
   gecko_id: string | null;
   symbol: string | null;
-  token_status: 'pre-token';
+  token_status: 'pre-token' | 'live-token';
   on_watchlist: boolean;
   age_days: number | null;
   implied_value_usd: number;
@@ -403,7 +403,7 @@ export function buildBoard(snapshot: Snapshot, constants: ModelConstants): Board
     listed_at: s.p.listed_at,
     gecko_id: s.p.gecko_id,
     symbol: s.p.symbol,
-    token_status: 'pre-token',
+    token_status: isPreToken(s.p) ? 'pre-token' : 'live-token',
     on_watchlist: watchlist.has(s.p.slug),
     age_days: s.age,
     implied_value_usd: s.scored.implied_value_usd,
@@ -502,6 +502,8 @@ export function parseSnapshot(text: string): Snapshot {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new SnapshotError('snapshot.json is not a JSON object');
   const o = raw as Record<string, unknown>;
   if (typeof o.as_of !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(o.as_of)) throw new SnapshotError('snapshot.json has no as_of date');
+  const asOf = new Date(`${o.as_of}T00:00:00Z`);
+  if (!Number.isFinite(asOf.getTime()) || asOf.toISOString().slice(0, 10) !== o.as_of) throw new SnapshotError('snapshot.json has an as_of date that is not a real date');
   if (typeof o.source !== 'string') throw new SnapshotError('snapshot.json has no source');
   if (typeof o.floor_usd !== 'number' || !Number.isSafeInteger(o.floor_usd) || o.floor_usd <= 0) throw new SnapshotError('snapshot.json has no floor_usd');
   if (!Array.isArray(o.protocols)) throw new SnapshotError('snapshot.json has no protocols array');
@@ -509,8 +511,8 @@ export function parseSnapshot(text: string): Snapshot {
   const protocols = o.protocols.map((v, i) => {
     if (typeof v !== 'object' || v === null || Array.isArray(v)) throw new SnapshotError(`snapshot.json's protocol ${i} is not an object`);
     const p = v as Record<string, unknown>;
-    if (typeof p.slug !== 'string' || typeof p.name !== 'string' || typeof p.tvl_usd !== 'number' || !Number.isFinite(p.tvl_usd)) {
-      throw new SnapshotError(`snapshot.json's protocol ${i} lacks a slug, a name or a TVL`);
+    if (typeof p.slug !== 'string' || typeof p.name !== 'string' || typeof p.tvl_usd !== 'number' || !Number.isFinite(p.tvl_usd) || p.tvl_usd <= 0) {
+      throw new SnapshotError(`snapshot.json's protocol ${i} lacks a slug, a name or a positive TVL`);
     }
     return {
       slug: p.slug,
@@ -521,10 +523,15 @@ export function parseSnapshot(text: string): Snapshot {
       change_7d: typeof p.change_7d === 'number' && Number.isFinite(p.change_7d) ? p.change_7d : null,
       mcap_usd: typeof p.mcap_usd === 'number' && Number.isFinite(p.mcap_usd) ? p.mcap_usd : null,
       listed_at: typeof p.listed_at === 'string' ? p.listed_at : null,
-      gecko_id: typeof p.gecko_id === 'string' ? p.gecko_id : null,
-      symbol: typeof p.symbol === 'string' ? p.symbol : null,
+      gecko_id: typeof p.gecko_id === 'string' && p.gecko_id !== '' ? p.gecko_id : null,
+      symbol: typeof p.symbol === 'string' && p.symbol !== '' ? p.symbol : null,
     };
   });
+  const seen = new Set<string>();
+  for (const p of protocols) {
+    if (seen.has(p.slug)) throw new SnapshotError(`snapshot.json repeats the slug ${p.slug}`);
+    seen.add(p.slug);
+  }
   return {
     as_of: o.as_of,
     source: o.source,
