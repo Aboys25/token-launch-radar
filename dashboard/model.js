@@ -1,7 +1,5 @@
-// The radar's value model, shared by main.ts and the dashboard page.
-//
-// A comps curve, fitted at run time from the snapshot's own traded
-// protocols — never a hand-chosen multiple:
+// The radar's value model, shared by main.ts and the dashboard page: a
+// comps curve fitted at run time, never a hand-chosen multiple:
 //
 //   implied = round( curve(tvl) x category x growth x maturity )
 //   curve(tvl) = exp(intercept + slope x ln(tvl))  (least squares on comps)
@@ -9,20 +7,18 @@
 //   growth     = 1 + clamp(change_7d, floor, cap) / 100 x growth_weight
 //   maturity   = floor + min(age, days) / days x range
 //
-// Why a curve: the fitted slope is well below 1, so the multiple falls
-// steeply with size and one flat multiple overvalues the biggest
-// protocols many times over. The band is the backtest's typical miss.
+// The slope is well below 1, so one flat multiple would overvalue the
+// biggest protocols many times over. The band is the backtest's miss.
 //
-// Loaded two ways: as a classic script it sets window.RadarModel; required
-// from Node (main.ts imports it) it exports the same object. No imports, no
-// network, no randomness but a fixed-seed bootstrap: two runs agree.
+// Classic script: sets window.RadarModel. Required from Node: exports the
+// same object. No imports, no network; fixed-seed bootstrap, so runs agree.
 
 (function (root) {
   'use strict';
 
   var DAY_MS = 86400000;
 
-  /** A whole day count from `listedAt` to `asOf`, clamped at zero; null when either date is absent or bad. */
+  /** Whole days from `listedAt` to `asOf`, clamped at zero; null when a date is absent or bad. */
   function ageDays(asOf, listedAt) {
     if (listedAt === null || listedAt === undefined) return null;
     var a = Date.parse(asOf + 'T00:00:00Z');
@@ -39,7 +35,7 @@
     return Math.round(n * 1e4) / 1e4;
   }
 
-  /** The median of a list of numbers (the list is left untouched). */
+  /** The median; the list is left untouched. */
   function median(values) {
     if (values.length === 0) return 0;
     var sorted = values.slice().sort(function (a, b) { return a - b; });
@@ -47,18 +43,15 @@
     return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   }
 
-  /** A percentile of a list of numbers, nearest-rank; p in [0, 1]. */
+  /** A nearest-rank percentile; p in [0, 1]. */
   function percentile(values, p) {
     if (values.length === 0) return 0;
     var sorted = values.slice().sort(function (a, b) { return a - b; });
     return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))];
   }
 
-  /**
-   * The comps curve: least squares of ln(market cap) on ln(TVL) over `comps`,
-   * each {tvl_usd, mcap_usd}. Returns {intercept, slope}. A slope below 1 is
-   * the finding, not a bug: big protocols trade at smaller multiples.
-   */
+  /** Least squares of ln(market cap) on ln(TVL) over `comps`. A slope below 1
+   * is the finding: big protocols trade at smaller multiples. */
   function fitCurve(comps) {
     var n = comps.length;
     var xs = [], ys = [], mx = 0, my = 0, i;
@@ -70,19 +63,17 @@
     return { intercept: my - slope * mx, slope: slope };
   }
 
-  /**
-   * Each category's yardstick: the median log-residual of its comps from the
-   * curve, shrunk toward zero by n/(n+k) so a category with one or two comps
-   * barely moves the curve and a deep one speaks. Returns {category: log-adj}.
-   */
+  /** Each category's yardstick: the median log-residual of its comps, shrunk
+   * by n/(n+k) so thin categories barely move the curve. */
   function categoryAdjustments(comps, fit, k) {
-    var byCat = {};
+    // Null-prototype accumulators, so `__proto__` is a key like any other.
+    var byCat = Object.create(null);
     comps.forEach(function (p) {
       var cat = p.category || 'Other';
       var residual = Math.log(p.mcap_usd) - (fit.intercept + fit.slope * Math.log(p.tvl_usd));
       (byCat[cat] = byCat[cat] || []).push(residual);
     });
-    var out = {};
+    var out = Object.create(null);
     Object.keys(byCat).forEach(function (cat) {
       var list = byCat[cat];
       out[cat] = (list.length / (list.length + k)) * median(list);
@@ -100,23 +91,24 @@
     return { growth_pct: growthPct, growth_multiplier: growthMult, maturity_multiplier: maturityMult };
   }
 
-  /** The log of the value the curve + category + tilts predict for one row. */
+  /** A category's yardstick, or 0; the own-property check defeats prototype names. */
+  function adjOf(adjustments, cat) {
+    return Object.prototype.hasOwnProperty.call(adjustments, cat) ? adjustments[cat] : 0;
+  }
+
+  /** The log of the predicted value for one row. */
   function predictLog(row, fit, adjustments, c) {
     var t = tilts(row, c);
-    var adj = adjustments[row.category || 'Other'] || 0;
+    var adj = adjOf(adjustments, row.category || 'Other');
     return fit.intercept + fit.slope * Math.log(Math.max(1, row.tvl_usd)) + adj + Math.log(t.growth_multiplier * t.maturity_multiplier);
   }
 
-  /**
-   * The implied value one protocol gets under the fitted constants `c`, with
-   * its band: the value times and divided by the backtest's typical miss.
-   * `row` carries tvl_usd, change_7d (null when unreported), age_days (null
-   * when the listing date is unknown) and category. Returns the value, the
-   * band and every factor, so the detail view can show the arithmetic.
-   */
+  /** The implied value under the fitted constants `c`, with its band (the
+   * value times and divided by the backtest's miss) and every factor, so the
+   * detail view can show the arithmetic. */
   function impliedValue(row, c) {
     var t = tilts(row, c);
-    var adj = c.category[row.category || 'Other'] || 0;
+    var adj = adjOf(c.category, row.category || 'Other');
     var curveUsd = Math.exp(c.curve_intercept + c.curve_slope * Math.log(Math.max(1, row.tvl_usd)));
     var implied = Math.max(1, Math.round(curveUsd * Math.exp(adj) * t.growth_multiplier * t.maturity_multiplier));
     var band = c.band_factor > 1 ? c.band_factor : 1;
@@ -132,12 +124,9 @@
     };
   }
 
-  /**
-   * The blind test: leave-one-out. Each comp is predicted by a curve fitted
-   * on the others alone (its category yardstick from the others too), so no
-   * protocol grades its own homework. Returns the miss factors: the median
-   * (the band), the 80th percentile, and the share inside x2.
-   */
+  /** The blind test: leave-one-out, each comp predicted by a curve fitted on
+   * the others alone. Returns the median miss (the band), the 80th
+   * percentile, and the share inside x2. */
   function looValidate(comps, c) {
     var errs = [];
     for (var i = 0; i < comps.length; i++) {
@@ -157,13 +146,10 @@
     };
   }
 
-  /**
-   * The cohort holdout: dated comps split at their median listing date,
-   * the model fits the earlier-listed half and is tested on the later,
-   * on current snapshot values throughout. A holdout by listing cohort,
-   * not a historical forecast, and the flat multiple beside it carries
-   * no adjustments, so the gap is the full model's, not the curve's alone.
-   */
+  /** The cohort holdout: dated comps split at their median listing date, fit
+   * on the earlier half, tested on the later, on current values throughout —
+   * a holdout by cohort, not a historical forecast. The flat multiple beside
+   * it carries no adjustments, so the gap is the full model's. */
   function timeSplitValidate(comps, c) {
     var dated = comps.filter(function (p) { return p.listed_at !== null && p.listed_at !== undefined; })
       .slice().sort(function (a, b) { return a.listed_at < b.listed_at ? -1 : a.listed_at > b.listed_at ? 1 : a.slug < b.slug ? -1 : 1; });
@@ -182,11 +168,8 @@
     return { train: train.length, test: test.length, median_factor: round4(Math.exp(median(errs))), flat_factor: round4(Math.exp(median(flatErrs))) };
   }
 
-  /**
-   * The stability check: 200 bootstrap resamples of the comps (a fixed-seed
-   * generator, so the numbers never move between runs), the curve refitted
-   * on each, reporting the slope's 10th, 50th and 90th percentiles.
-   */
+  /** The stability check: the curve refitted on fixed-seed bootstrap
+   * resamples of the comps, reporting the slope's 10th/50th/90th percentiles. */
   function bootstrapSlope(comps, rounds, seed) {
     var state = seed >>> 0 || 1;
     function next() { state = (Math.imul(state, 1103515245) + 12345) & 0x7fffffff; return state / 2147483648; }

@@ -1,41 +1,39 @@
 // The farm-plan generator, shared by main.ts and the dashboard page.
 //
-// Every board row carries a plan of seven steps, each an action with what it
-// costs and how long it takes, derived from the protocol's own record only:
-// its category decides the action, its first chain the gas tier, its TVL the
-// capital, its age the hold. No name is ever special-cased. main.ts writes
-// these same strings to board.json, and the page generates them from the
-// same row data, so the plan a screenshot shows is the plan the board
-// carries. The seventh step nets the plan: the low-end value times a stated
-// 10% farmer share, against the whole gas bill, gives the farmers covered
-// and the verdict — FARM, THIN or SKIP. The 10% is an assumption, labelled
-// as one wherever it appears, never a fact about the protocol.
+// Seven steps per row, each an action with its cost and time, from the
+// protocol's own record only: category decides the action, first chain the
+// gas tier, TVL the capital, age the hold. No name is special-cased. The
+// seventh step nets the plan at a stated 10% farmer share — an assumption,
+// labelled as one, never a fact — against the gas bill, giving the farmers
+// covered and the verdict: FARM, THIN or SKIP.
 //
-// Loaded two ways: as a classic script it sets window.RadarPlan; required from
-// Node (main.ts imports it) it exports the same object. No imports, no network.
+// Classic script: sets window.RadarPlan. Required from Node: exports the
+// same object. No imports, no network.
 
 (function (root) {
   'use strict';
 
-  /** Chains where a transaction costs cents, by the name DefiLlama gives them. */
-  var CHEAP_CHAINS = {
-    arbitrum: 1, avalanche: 1, base: 1, binance: 1, blast: 1, bob: 1, celo: 1,
-    fantom: 1, fraxtal: 1, gnosis: 1, hyperliquid: 1, injective: 1, ink: 1,
-    linea: 1, lisk: 1, mantle: 1, mode: 1, monad: 1, movement: 1, near: 1,
-    opbnb: 1, optimism: 1, plasma: 1, polygon: 1, ripple: 1, sei: 1, solana: 1,
-    soneium: 1, sonic: 1, sui: 1, aptos: 1, scroll: 1, tron: 1, unichain: 1,
-    zksync: 1, zircuit: 1, berachain: 1, plume: 1, megaeth: 1, abstract: 1,
-    apechain: 1, bitlayer: 1, core: 1, kava: 1, merlin: 1, osmosis: 1, ton: 1,
-  };
+  /** Chains where a transaction costs cents, by DefiLlama's name. A Set, so `constructor` cannot match the prototype. */
+  var CHEAP_CHAINS = new Set([
+    'arbitrum', 'avalanche', 'base', 'binance', 'blast', 'bob', 'celo',
+    'fantom', 'fraxtal', 'gnosis', 'hyperliquid', 'injective', 'ink',
+    'linea', 'lisk', 'mantle', 'mode', 'monad', 'movement', 'near',
+    'opbnb', 'optimism', 'plasma', 'polygon', 'ripple', 'sei', 'solana',
+    'soneium', 'sonic', 'sui', 'aptos', 'scroll', 'tron', 'unichain',
+    'zksync', 'zircuit', 'berachain', 'plume', 'megaeth', 'abstract',
+    'apechain', 'bitlayer', 'core', 'kava', 'merlin', 'osmosis', 'ton',
+    'bsc', 'bnb',
+  ]);
 
-  /** The gas tier of a chain: Ethereum is dear, the cheap set costs cents, the rest sit between. */
+  /** A chain's gas tier: Ethereum is dear, the cheap set costs cents, the rest between. */
   function gasTier(chain) {
     var name = String(chain || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
-    if (name === 'ethereum') return 'high';
-    if (CHEAP_CHAINS[name]) return 'low';
+    // "Ethereum L1" is Ethereum: the first word decides, as with the cheap set below.
+    if (name.split(' ')[0] === 'ethereum') return 'high';
+    if (CHEAP_CHAINS.has(name)) return 'low';
     // Names such as "Hyperliquid L1" carry the cheap chain's name plus a suffix.
     var first = name.split(' ')[0];
-    if (CHEAP_CHAINS[first]) return 'low';
+    if (CHEAP_CHAINS.has(first)) return 'low';
     return 'medium';
   }
 
@@ -45,32 +43,29 @@
     return 'about $2 of gas';
   }
 
-  /** The dollars one transaction costs on a gas tier. */
+  /** One transaction's dollars on a gas tier. */
   function gasUsd(tier) {
     if (tier === 'high') return 6;
     if (tier === 'low') return 0.5;
     return 2;
   }
 
-  /** The share of a launch's value assumed to reach farmers: an assumption, stated wherever it is used. */
+  /** The assumed share of a launch's value reaching farmers, stated wherever used. */
   var FARMER_SHARE = 0.1;
 
-  /** Compact dollars: $1.2M, $340K, $45. */
+  /** Compact dollars: $1.2M, $340K, $45. Rounding carries up a unit, never $1000K. Shared with the page. */
   function fmtUsd(n) {
-    if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
-    if (n >= 1e6) return '$' + (n / 1e6).toFixed(1) + 'M';
-    if (n >= 1e3) return '$' + Math.round(n / 1e3) + 'K';
-    return '$' + Math.round(n);
+    var sign = n < 0 ? '-' : '';
+    var a = Math.abs(n);
+    if (a >= 1e9) return sign + '$' + (a / 1e9).toFixed(2) + 'B';
+    if (a >= 1e6) return sign + '$' + (a / 1e6 >= 999.95 ? (a / 1e9).toFixed(2) + 'B' : (a / 1e6).toFixed(1) + 'M');
+    if (a >= 1e3) { var k = Math.round(a / 1e3); return k >= 1000 ? sign + '$' + (a / 1e6).toFixed(1) + 'M' : sign + '$' + k + 'K'; }
+    return sign + '$' + Math.round(a);
   }
 
-  /**
-   * The plan's economics, netted: the whole gas bill (one setup, one action,
-   * one a week across the hold, one claim) against the farmer pool at
-   * the band's low end. `lowUsd` is the row's low-end implied value. Returns
-   * the gas, the capital held, the hold, the pool, the farmers covered, and
-   * the verdict: FARM when the launch covers at least fifty thousand farmers
-   * at this cost, THIN at five thousand, SKIP below that.
-   */
+  /** The plan's economics, netted: the whole gas bill against the farmer pool
+   * at the band's low end (`lowUsd`). FARM at 50,000 farmers covered, THIN at
+   * 5,000, SKIP below that. */
   function planEconomics(row, lowUsd) {
     var tier = gasTier(chainOf(row));
     var capital = capitalFor(row.tvl_usd);
@@ -83,7 +78,7 @@
     return { gas_usd: gas, tx_count: txs, capital_usd: capital, hold_days: hold, pool_usd: Math.round(pool), farmers: farmers, verdict: verdict };
   }
 
-  /** How much capital one farm position needs, from the protocol's own TVL. */
+  /** The capital one farm position needs, from the protocol's TVL. */
   function capitalFor(tvlUsd) {
     if (tvlUsd >= 5000000000) return 250;
     if (tvlUsd >= 1000000000) return 150;
@@ -91,7 +86,7 @@
     return 50;
   }
 
-  /** How long to hold, from the protocol's age: younger protocols get a longer qualifying window. */
+  /** The hold, from the protocol's age: younger protocols hold longer. */
   function holdDaysFor(ageDays) {
     if (ageDays === null || ageDays === undefined) return 45;
     if (ageDays < 180) return 60;
@@ -99,12 +94,12 @@
     return 30;
   }
 
-  /** The first chain a protocol names, or a neutral phrase. */
+  /** The first chain named, or a neutral phrase. */
   function chainOf(row) {
     return row.chains && row.chains.length > 0 ? row.chains[0] : 'its main chain';
   }
 
-  /** The category's one action, in the words a farmer can follow. */
+  /** The category's one action, in words a farmer can follow. */
   function actionFor(row, capital, chain) {
     var c = String(row.category || '').toLowerCase();
     var name = row.name;
@@ -116,6 +111,9 @@
     }
     if (c.indexOf('bridge') >= 0) {
       return 'Bridge $' + capital + ' of USDC to ' + chain + ' through ' + name + ', then use the bridged funds inside its app.';
+    }
+    if (c.indexOf('index') >= 0) {
+      return 'Buy $' + capital + ' of the index token ' + name + ' issues on ' + chain + ' and hold it in the farm wallet.';
     }
     if (c.indexOf('dex') >= 0) {
       return 'Provide $' + capital + ' of liquidity to ' + name + "'s main pool on " + chain + ' and keep the position open.';
@@ -141,9 +139,6 @@
     if (c.indexOf('insurance') >= 0) {
       return 'Buy $' + capital + ' of cover from ' + name + ' on ' + chain + ' and keep the policy active for the hold.';
     }
-    if (c.indexOf('index') >= 0) {
-      return 'Buy $' + capital + ' of the index token ' + name + ' issues on ' + chain + ' and hold it in the farm wallet.';
-    }
     if (c.indexOf('launchpad') >= 0) {
       return 'Commit $' + capital + ' through ' + name + ' on ' + chain + ' to qualify for its next allocation round.';
     }
@@ -159,26 +154,23 @@
     if (c.indexOf('token locker') >= 0 || c.indexOf('locker') >= 0) {
       return 'Lock $' + capital + ' of tokens through ' + name + ' on ' + chain + ' and keep the lock receipt for the hold.';
     }
-    if (c.indexOf('ai') >= 0) {
+    // Whole-word 'ai' only: 'domains' carries the letters, not the meaning.
+    if (c.split(/[^a-z0-9]+/).indexOf('ai') >= 0) {
       return 'Spend $' + capital + ' of usage on ' + name + ' on ' + chain + ' across the hold, one paid action a week.';
     }
     return 'Deposit $' + capital + ' of USDC into ' + name + ' on ' + chain + ' and keep the position open.';
   }
 
-  /** One step as a single string: its action, then its cost and time, within 20 to 600 characters. */
+  /** One step: action, cost and time in a single string, 20 to 600 chars. */
   function stepText(text, cost, time) {
-    var s = text + ' Cost: ' + cost + '. Time: ' + time + '.';
-    if (s.length > 600) s = s.slice(0, 597) + '...';
+    // Cut the action, never the cost/time tail.
+    var tail = ' Cost: ' + cost + '. Time: ' + time + '.';
+    var s = text.length + tail.length > 600 ? text.slice(0, 600 - tail.length - 3) + '...' + tail : text + tail;
     if (s.length < 20) s += ' Hold the position and check the protocol\'s own page.';
     return s;
   }
 
-  /**
-   * A protocol's farm plan: six action steps plus the netting step, each an
-   * action with a cost and a time. `row` carries name, category, chains,
-   * tvl_usd, age_days and low_usd (the band's low end; without it the plan
-   * carries the six action steps only).
-   */
+  /** Six action steps plus the netting step (six only when `row.low_usd` is absent). */
   function buildFarmSteps(row) {
     var chain = chainOf(row);
     var tier = gasTier(chain);
@@ -229,7 +221,7 @@
     return steps;
   }
 
-  var api = { buildFarmSteps: buildFarmSteps, planEconomics: planEconomics, capitalFor: capitalFor, holdDaysFor: holdDaysFor, gasTier: gasTier, farmerShare: FARMER_SHARE };
+  var api = { buildFarmSteps: buildFarmSteps, planEconomics: planEconomics, capitalFor: capitalFor, holdDaysFor: holdDaysFor, gasTier: gasTier, fmtUsd: fmtUsd, farmerShare: FARMER_SHARE };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.RadarPlan = api;
