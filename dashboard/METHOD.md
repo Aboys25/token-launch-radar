@@ -1,53 +1,35 @@
 # How this radar works
 
-## The question
-
 Which protocol with no token on record is worth farming next, what would
-its launch be worth, and what should a reader do? The radar
-answers from one frozen snapshot of the protocol universe. On the sealed
-snapshot: 758 protocols, of which 342 record no token. It never predicts
-whether or when a token is issued. A protocol is called pre-token only
-because its record carries no token; the record is not proof it has none.
+its launch be worth, and what should a reader do? One frozen snapshot:
+758 protocols, 342 with no token on record. It never predicts whether or
+when a token is issued.
 
-## The board
+198 rows: all 40 watchlist protocols, plus every other rankable
+pre-token protocol. 144 are set aside by the house rule (wrapped/staked/
+bridged category, versioned name, wrapped/staked word, exchange name),
+listed by name on the Set aside tab. Live-token protocols calibrate the
+model.
 
-198 rows on the sealed snapshot: all 40 watchlist protocols, plus every
-other rankable pre-token protocol the watchlist leaves out. 144
-pre-token protocols are set aside by the house's exclusion rule —
-wrapped, staked or bridged category, a versioned name, a wrapped or
-staked word, an exchange's name — because each is a product of a token
-that already trades. The protocols whose
-token already trades are kept apart: they calibrate the model and appear
-in their own view at market values.
+Every term is fitted at run time from the traded comps by median
+regression on ln(market cap): ln(mcap) = b0 + b1 ln(TVL) + b2 growth +
+b3 ln(1+age) + category. No tilt is hand-set. Growth is winsorized,
+unknown ages take the comps' median age, each category's effect is its
+shrunken median residual, the shrinkage chosen by leave-one-out. The
+fitted growth coefficient is positive, the age coefficient slightly
+negative. Launch odds are empirical, by age/TVL cohort.
 
-## The value model (radar-3)
+Three blind tests, all computed at run time. Leave-one-out: each comp
+predicted by a model fitted without it; the median miss is the band on
+every row. Walk-forward: four expanding windows on listing date. Random
+holdouts: five seeded 70/30 splits against a flat multiple, median
+reported with the worst seed included.
 
-A comps curve, fitted at run time from the snapshot's traded protocols:
-least squares of ln(market cap) on ln(TVL) over the comps resembling the
-ranked set; each category's yardstick is its comps' median miss, shrunk
-toward zero so thin categories barely move it; growth and maturity tilt
-the result within stated bounds.
-A curve, not one multiple: the fitted slope is well below 1, so one flat
-multiple overvalues the biggest protocols many times over.
-
-## The tests
-
-The curve is tested blind. Leave-one-out: each comp is predicted by a
-curve fitted without it. Cohort holdout: the model is fitted on the
-earlier-listed half and tested on the later half, on current values
-throughout — a holdout by cohort, not a historical forecast — beside a
-flat multiple with no adjustments, so the gap is the full model's, not
-the curve's alone. Bootstrap: the slope is refitted on 200 resamples.
-The page's numbers are the measured results, computed from this snapshot
-at run time — including the wide band, the blind test's typical miss,
-not a chosen margin.
-
-## The farm plans
-
-Seven steps per protocol, derived from its category, chains, size and
-age, each with a cost and a time. The last step nets the plan: the
+Seven steps per protocol, each varying with a fact about it: wallet by
+chain family, action and weekly action by category group, hold by age
+band and peers' launch odds, claim by category group, log by verdict.
+Each step carries a cost and a time. The last step nets the plan: the
 band's low end times a stated 10% farmer share, against the whole gas
-bill, gives the farmers covered and the verdict: FARM, THIN or SKIP.
-The 10% is an assumption, labelled as one. The model and the plan
-generator are the same code the program runs, so the page recomputes
-the opened row and checks the board's numbers.
+bill, gives the farmers covered and the verdict: FARM, THIN or SKIP. The
+10% is an assumption, labelled as one. Rows carry integrity flags where
+the model leans on a fallback.

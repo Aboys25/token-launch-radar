@@ -1,14 +1,15 @@
 // A token-radar-01 entry (Node 22, standard library only).
 //
 // The program reads the sealed snapshot from /input/snapshot.json (or --input
-// <file|dir>, or $MAKEFUN_INPUT_DIR), calibrates the value model from the
-// snapshot's own live-token protocols, scores every rankable pre-token protocol,
-// writes the ranked board to /output/board.json, writes the dashboard's data as
-// data.js beside the page, copies this repository's dashboard/ and screenshots/
-// to /output, and writes /output/dossier.json, the summary the judge reads, with
-// the vendored make.fun library. The board is checked against the gate's own
-// shape before anything is written, and the program is deterministic: two runs
-// on the same snapshot write the same bytes.
+// <file|dir>, or $MAKEFUN_INPUT_DIR), fits every term of the value model from
+// the snapshot's own live-token protocols by median regression, scores every
+// rankable pre-token protocol, writes the ranked board to /output/board.json,
+// writes the dashboard's data as data.js beside the page, copies this
+// repository's dashboard/ and screenshots/ to /output, and writes
+// /output/dossier.json, the summary the judge reads, with the vendored
+// make.fun library. The board is checked against the gate's own shape before
+// anything is written, and the program is deterministic: two runs on the same
+// snapshot write the same bytes.
 //
 // The dashboard is a static page, no framework and no network: dashboard/
 // index.html, app.css, app.js, model.js and plan.js read data.js, which this
@@ -34,6 +35,11 @@ const DASHBOARD_CAPS = { max_files: 400, max_bytes: 4_194_304 };
 const IMAGE_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
 
 /** --name <value> out of the arguments, or the fallback. A flag left bare is an error, never a silent fallback. */
+/** Format a fitted coefficient with its sign, so a negative one reads "\u2212 0.2789" and never "+ -0.2789". */
+function coef(x: number): string {
+  return (x < 0 ? '\u2212 ' : '+ ') + Math.abs(x).toFixed(4);
+}
+
 function arg(name: string, fallback: string): string {
   const at = process.argv.indexOf(`--${name}`);
   if (at >= 0 && at + 1 >= process.argv.length) {
@@ -134,17 +140,31 @@ try {
 }
 writeFileSync(join(out, 'dossier.json'), dossier);
 
-// The summary names the fallback honestly: with too few comps no curve is
-// fitted and no blind test runs, so the line must not claim refits.
+// The summary names the fallback honestly: with too few comps no fit runs
+// and no blind test runs, so the lines must not claim refits.
 const validation = radar.calibration.validation;
-const curveSummary =
-  validation.boot_rounds > 0
-    ? `curve ln(mcap) = ${radar.model.curve_intercept.toFixed(4)} + ${radar.model.curve_slope.toFixed(4)} ln(TVL) fitted on ${radar.calibration.comps} traded comps; band x${radar.model.band_factor} from leave-one-out (median miss, ${validation.loo_n} refits)`
-    : `curve not fitted: ${radar.calibration.comps} traded comps is too few, so a stated 0.25 multiple and a x${radar.model.band_factor} band stand in, untested`;
+const beta = radar.model.beta;
+const fitted = radar.calibration.comps >= 10;
+const modelSummary = fitted
+  ? `model ln(mcap) = ${beta[0]!.toFixed(4)} ${coef(beta[1]!)} ln(TVL) ${coef(beta[2]!)} growth ${coef(beta[3]!)} ln(1+age) + category, fitted on ${radar.calibration.comps} traded comps by median regression; band x${radar.model.band_factor} from leave-one-out (median miss, ${validation.loo_n} refits)`
+  : `model not fitted: ${radar.calibration.comps} traded comps is too few, so a stated 0.25 multiple and a x${radar.model.band_factor} band stand in, untested`;
+const wfSummary = fitted && validation.wf_folds.length > 0
+  ? `walk-forward: ${validation.wf_folds.map((f) => `train ${f.train}/test ${f.test} x${f.median_factor}`).join(', ')}`
+  : 'walk-forward: not run';
+const holdSummary = fitted
+  ? `random holdouts (seeds ${validation.hold_seeds.join(', ')}): model x${validation.hold_median_factor} vs flat multiple x${validation.hold_flat_factor} (median of ${validation.hold_runs.length} 70/30 splits)`
+  : 'random holdouts: not run';
+const odds = radar.calibration.odds;
+const oddsMin = Math.min(...odds.cells.map((c) => c.odds));
+const oddsMax = Math.max(...odds.cells.map((c) => c.odds));
+const oddsSummary = `launch odds: ${Math.round(odds.global_rate * 100)}% of protocols record a token; by age/TVL cohort ${Math.round(oddsMin * 100)}–${Math.round(oddsMax * 100)}%`;
 
 process.stdout.write(
-  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: ${curveSummary}\n` +
-    `token radar: audit: ${radar.audit.pre_token} record no token, ${radar.audit.set_aside} set aside (${radar.audit.set_aside_category} category, ${radar.audit.set_aside_versioned} versioned, ${radar.audit.set_aside_name} name, ${radar.audit.set_aside_exchange} exchange)\n` +
+  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live shown, ${radar.set_aside.length} set aside listed)\n` +
+    `token radar: ${modelSummary}\n` +
+    `token radar: ${wfSummary}\n` +
+    `token radar: ${holdSummary}\n` +
+    `token radar: ${oddsSummary}\n` +
+    `token radar: audit: ${radar.audit.pre_token} record no token, ${radar.audit.set_aside} set aside (${radar.audit.set_aside_category} category, ${radar.audit.set_aside_versioned} versioned, ${radar.audit.set_aside_name} name, ${radar.audit.set_aside_exchange} exchange); integrity: ${radar.integrity.unknown_age_rows} unknown-age, ${radar.integrity.thin_category_rows} thin-category, ${radar.integrity.missing_growth_rows} no-growth rows\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashboardFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

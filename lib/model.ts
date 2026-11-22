@@ -14,9 +14,11 @@
 // The value model itself lives in dashboard/model.js, shared with the page, so
 // the number board.json carries and the number the page recomputes are the
 // same arithmetic; the farm plans live in dashboard/plan.js the same way.
-// What this file adds is the snapshot's parsing, the comps set, the curve fit
-// and its blind tests run at run time, the board's assembly, the audit of the
-// pre-token universe, and the gate's own checks run before anything is written.
+// What this file adds is the snapshot's parsing, the comps set, the fit and
+// its blind tests run at run time, the launch odds from the peers' record,
+// the board's assembly, the audit of the pre-token universe — including the
+// set-aside protocols listed by name — and the gate's own checks run before
+// anything is written.
 
 import modelJs from '../dashboard/model.js';
 import planJs from '../dashboard/plan.js';
@@ -55,20 +57,35 @@ export interface CompRow {
   listed_at: string | null;
 }
 
-/** The value model's constants, as the dashboard states them. */
+/** The value model's constants, as the dashboard states them.
+ * beta is [intercept, ln TVL, growth, ln(1+age)] of the median regression on
+ * ln(mcap); category holds each category's shrunken effect; growth_floor /
+ * growth_cap are the comps' own winsor bounds; unknown_age_days is the comps'
+ * median age; band_factor is the leave-one-out median miss. */
 export interface ModelConstants {
-  curve_intercept: number;
-  curve_slope: number;
+  beta: number[];
   category: Record<string, number>;
   shrink_k: number;
-  growth_weight: number;
   growth_floor: number;
   growth_cap: number;
-  maturity_floor: number;
-  maturity_range: number;
-  maturity_days: number;
   unknown_age_days: number;
   band_factor: number;
+}
+
+/** One walk-forward fold: the expanding train, the next slice of listings, and its median miss. */
+export interface WalkForwardFold {
+  train: number;
+  test: number;
+  median_factor: number;
+}
+
+/** One seeded random holdout run: the model against a flat multiple on the same split. */
+export interface HoldoutRun {
+  seed: number;
+  train: number;
+  test: number;
+  median_factor: number;
+  flat_factor: number;
 }
 
 /** The blind tests' results, for the model panel. */
@@ -77,14 +94,28 @@ export interface Validation {
   loo_median_factor: number;
   loo_p80_factor: number;
   loo_within_2x: number;
-  split_train: number;
-  split_test: number;
-  split_median_factor: number;
-  split_flat_factor: number;
-  boot_rounds: number;
-  boot_slope_p10: number;
-  boot_slope_p50: number;
-  boot_slope_p90: number;
+  wf_folds: WalkForwardFold[];
+  hold_seeds: number[];
+  hold_runs: HoldoutRun[];
+  hold_median_factor: number;
+  hold_flat_factor: number;
+}
+
+/** One cell of the launch-odds table: an age band crossed with a TVL band. */
+export interface OddsCell {
+  age: number;
+  tvl: number;
+  n: number;
+  tokened: number;
+  odds: number;
+}
+
+/** The launch odds from the peers' own record: age tertile x TVL tertile. */
+export interface OddsTable {
+  global_rate: number;
+  age_cuts: number[];
+  tvl_cuts: number[];
+  cells: OddsCell[];
 }
 
 /** How the constants were calibrated from this snapshot, for the model panel. */
@@ -93,6 +124,7 @@ export interface Calibration {
   median_age_days: number;
   known_age_protocols: number;
   validation: Validation;
+  odds: OddsTable;
 }
 
 /** The audit of the pre-token universe: what was ranked and what was set aside, and why. */
@@ -108,21 +140,29 @@ export interface Audit {
   set_aside_exchange: number;
 }
 
-/** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-3';
+/** A set-aside protocol, listed by name so the board accounts for all 758. */
+export interface SetAsideRow {
+  slug: string;
+  name: string;
+  category: string | null;
+  chains: string[];
+  tvl_usd: number;
+  age_days: number | null;
+  reason: 'category' | 'versioned' | 'name' | 'exchange';
+}
 
-/** The growth and maturity weights: fixed, stated, and the same for every row. */
-const GROWTH_WEIGHT = 0.5;
-const GROWTH_FLOOR = -60;
-const GROWTH_CAP = 120;
-const MATURITY_FLOOR = 0.6;
-const MATURITY_RANGE = 0.4;
-const MATURITY_DAYS = 1095;
-/** The category yardstick's shrinkage: a category's pull is n/(n+k). */
-const SHRINK_K = 10;
-/** Bootstrap rounds for the slope stability check (fixed seed: deterministic). */
-const BOOT_ROUNDS = 200;
-const BOOT_SEED = 20261114;
+/** The integrity flags: where the board leans on a fallback instead of a measured figure. */
+export interface Integrity {
+  unknown_age_rows: number;
+  thin_category_rows: number;
+  missing_growth_rows: number;
+}
+
+/** The model's version label: the dashboard names it. */
+export const MODEL_VERSION = 'radar-4';
+
+/** The random holdout's fixed seeds: five splits, so one noisy split cannot decide it. */
+const HOLD_SEEDS = [1, 2, 3, 5, 7];
 
 /** How many live-token protocols the dashboard's Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -146,14 +186,16 @@ export interface BoardRow {
   implied_value_usd: number;
   low_usd: number;
   high_usd: number;
+  launch_odds: number;
   verdict: string;
   plan_cost_usd: number;
+  flags: string[];
   model: {
     curve_usd: number;
     category_multiplier: number;
     growth_pct: number;
-    growth_multiplier: number;
-    maturity_multiplier: number;
+    growth_factor: number;
+    age_factor: number;
     age_days: number | null;
   };
   farm_steps: string[];
@@ -175,10 +217,12 @@ export interface RadarRow {
   implied_value_usd: number;
   low_usd: number;
   high_usd: number;
+  launch_odds: number;
   verdict: string;
   plan_cost_usd: number;
-  growth_multiplier: number;
-  maturity_multiplier: number;
+  flags: string[];
+  growth_factor: number;
+  age_factor: number;
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value. */
@@ -200,6 +244,7 @@ export interface RadarData {
   model: ModelConstants;
   calibration: Calibration;
   audit: Audit;
+  integrity: Integrity;
   model_version: string;
   watchlist_size: number;
   board_size: number;
@@ -207,6 +252,7 @@ export interface RadarData {
   live_size: number;
   rows: RadarRow[];
   live: LiveRow[];
+  set_aside: SetAsideRow[];
 }
 
 /** Why the snapshot is not one this model can score. */
@@ -281,14 +327,28 @@ export function compsOf(snapshot: Snapshot): CompRow[] {
     }));
 }
 
+/** The model.js shape of the constants: the same numbers under the names the shared code reads. */
+function jsModel(constants: ModelConstants): Record<string, unknown> {
+  return {
+    beta: constants.beta,
+    cat: constants.category,
+    glo: constants.growth_floor,
+    ghi: constants.growth_cap,
+    medAge: constants.unknown_age_days,
+    band_factor: constants.band_factor,
+  };
+}
+
 /**
- * Calibrate the model's constants from the snapshot itself: fit the comps
- * curve, shrink the category yardsticks, run the blind tests, and take the
- * band from the leave-one-out median miss. The unknown-age fallback is the
- * median age of the protocols with a listing date. Everything is computed
- * here, at run time, from the sealed input, and shipped to the dashboard in
- * data.js. With too few comps to fit, the curve falls back to a flat 0.25
- * multiple and a x3 band, stated in the code rather than hidden.
+ * Calibrate the model's constants from the snapshot itself: fit every term of
+ * the median regression on the comps, run the blind tests — leave-one-out,
+ * four walk-forward folds, five seeded random holdouts against a flat multiple —
+ * and take the band from the leave-one-out median miss. The launch odds come
+ * from the peers' own record. The unknown-age fallback is the median age of
+ * the protocols with a listing date. Everything is computed here, at run time,
+ * from the sealed input, and shipped to the dashboard in data.js. With too few
+ * comps to fit, the value falls back to a flat 0.25 multiple and a x3 band,
+ * stated in the code rather than hidden.
  */
 export function calibrate(snapshot: Snapshot): { constants: ModelConstants; calibration: Calibration } {
   const comps = compsOf(snapshot);
@@ -297,55 +357,44 @@ export function calibrate(snapshot: Snapshot): { constants: ModelConstants; cali
     .filter((a): a is number => a !== null)
     .sort((a, b) => a - b);
   const medianAge = ages.length > 0 ? Math.round(median(ages)) : 365;
-  const tilt = {
-    growth_weight: GROWTH_WEIGHT,
-    growth_floor: GROWTH_FLOOR,
-    growth_cap: GROWTH_CAP,
-    maturity_floor: MATURITY_FLOOR,
-    maturity_range: MATURITY_RANGE,
-    maturity_days: MATURITY_DAYS,
-    unknown_age_days: medianAge,
-    shrink_k: SHRINK_K,
-  };
+  const odds: OddsTable = modelJs.oddsTable(snapshot.protocols, snapshot.as_of);
   if (comps.length < 10) {
     const fallback: Validation = {
       loo_n: comps.length, loo_median_factor: 3, loo_p80_factor: 3, loo_within_2x: 0,
-      split_train: 0, split_test: 0, split_median_factor: 0, split_flat_factor: 0,
-      boot_rounds: 0, boot_slope_p10: 1, boot_slope_p50: 1, boot_slope_p90: 1,
+      wf_folds: [],
+      hold_seeds: HOLD_SEEDS, hold_runs: [], hold_median_factor: 0, hold_flat_factor: 0,
     };
     return {
-      constants: { curve_intercept: Math.log(0.25), curve_slope: 1, category: {}, ...tilt, band_factor: 3 },
-      calibration: { comps: comps.length, median_age_days: medianAge, known_age_protocols: ages.length, validation: fallback },
+      constants: { beta: [Math.log(0.25), 1, 0, 0], category: {}, shrink_k: 10, growth_floor: -60, growth_cap: 120, unknown_age_days: medianAge, band_factor: 3 },
+      calibration: { comps: comps.length, median_age_days: medianAge, known_age_protocols: ages.length, validation: fallback, odds },
     };
   }
-  const fit = modelJs.fitCurve(comps);
-  const adjustments = modelJs.categoryAdjustments(comps, fit, SHRINK_K);
-  const loo = modelJs.looValidate(comps, tilt);
-  const split = modelJs.timeSplitValidate(comps, tilt);
-  const boot = modelJs.bootstrapSlope(comps, BOOT_ROUNDS, BOOT_SEED);
+  const fit = modelJs.fitModel(comps);
+  const loo = modelJs.looValidate(comps, fit.k);
+  const wf = modelJs.walkForward(comps);
+  const hold = modelJs.repeatedHoldout(comps, HOLD_SEEDS);
   const validation: Validation = {
     loo_n: loo.n,
     loo_median_factor: loo.median_factor,
     loo_p80_factor: loo.p80_factor,
     loo_within_2x: loo.within_2x,
-    split_train: split.train,
-    split_test: split.test,
-    split_median_factor: split.median_factor,
-    split_flat_factor: split.flat_factor,
-    boot_rounds: boot.rounds,
-    boot_slope_p10: boot.slope_p10,
-    boot_slope_p50: boot.slope_p50,
-    boot_slope_p90: boot.slope_p90,
+    wf_folds: wf.folds,
+    hold_seeds: hold.seeds,
+    hold_runs: hold.runs,
+    hold_median_factor: hold.median_factor,
+    hold_flat_factor: hold.flat_factor,
   };
   return {
     constants: {
-      curve_intercept: fit.intercept,
-      curve_slope: fit.slope,
-      category: adjustments,
-      ...tilt,
+      beta: fit.beta,
+      category: fit.cat,
+      shrink_k: fit.k,
+      growth_floor: fit.glo,
+      growth_cap: fit.ghi,
+      unknown_age_days: fit.medAge,
       band_factor: loo.median_factor > 1 ? loo.median_factor : 1,
     },
-    calibration: { comps: comps.length, median_age_days: medianAge, known_age_protocols: ages.length, validation },
+    calibration: { comps: comps.length, median_age_days: medianAge, known_age_protocols: ages.length, validation, odds },
   };
 }
 
@@ -377,18 +426,49 @@ export function auditOf(snapshot: Snapshot, board: BoardRow[]): Audit {
   return audit;
 }
 
+/** The set-aside protocols, listed by name with the rule that set each one aside. */
+export function setAsideRows(snapshot: Snapshot, board: BoardRow[]): SetAsideRow[] {
+  const ranked = new Set(board.map((r) => r.slug));
+  return snapshot.protocols
+    .filter((p) => isPreToken(p) && !ranked.has(p.slug))
+    .map((p) => ({
+      slug: p.slug,
+      name: p.name,
+      category: p.category,
+      chains: p.chains,
+      tvl_usd: p.tvl_usd,
+      age_days: modelJs.ageDays(snapshot.as_of, p.listed_at),
+      reason: setAsideReason(p)!,
+    }))
+    .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+}
+
+/** A row's integrity flags: unknown age, a category with fewer than three comps, no 7-day growth. */
+function rowFlags(p: SnapshotProtocol, age: number | null, compCounts: Map<string, number>): string[] {
+  const flags: string[] = [];
+  if (age === null) flags.push('unknown-age');
+  if ((compCounts.get(p.category ?? 'Other') ?? 0) < 3) flags.push('thin-category');
+  if (p.change_7d === null) flags.push('no-growth');
+  return flags;
+}
+
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, constants: ModelConstants): BoardRow[] {
+export function buildBoard(snapshot: Snapshot, constants: ModelConstants, odds: OddsTable): BoardRow[] {
   const watchlist = new Set(snapshot.watchlist);
+  const comps = compsOf(snapshot);
+  const compCounts = new Map<string, number>();
+  for (const c of comps) compCounts.set(c.category ?? 'Other', (compCounts.get(c.category ?? 'Other') ?? 0) + 1);
+  const jm = jsModel(constants);
   const chosen = snapshot.protocols.filter((p) => watchlist.has(p.slug) || isRankable(p));
   const scored = chosen.map((p) => {
     const age = modelJs.ageDays(snapshot.as_of, p.listed_at);
-    const scored = modelJs.impliedValue({ tvl_usd: p.tvl_usd, change_7d: p.change_7d, age_days: age, category: p.category }, constants);
+    const scored = modelJs.impliedValue({ tvl_usd: p.tvl_usd, change_7d: p.change_7d, age_days: age, category: p.category }, jm);
+    const launchOdds = modelJs.oddsFor(odds, age, p.tvl_usd);
     const econ = planJs.planEconomics(
       { name: p.name, category: p.category, chains: p.chains, tvl_usd: p.tvl_usd, age_days: age },
       scored.low_usd,
     );
-    return { p, age, scored, econ };
+    return { p, age, scored, econ, launchOdds, flags: rowFlags(p, age, compCounts) };
   });
   scored.sort((a, b) => b.scored.implied_value_usd - a.scored.implied_value_usd || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -409,14 +489,16 @@ export function buildBoard(snapshot: Snapshot, constants: ModelConstants): Board
     implied_value_usd: s.scored.implied_value_usd,
     low_usd: s.scored.low_usd,
     high_usd: s.scored.high_usd,
+    launch_odds: s.launchOdds,
     verdict: s.econ.verdict,
     plan_cost_usd: s.econ.gas_usd,
+    flags: s.flags,
     model: {
       curve_usd: s.scored.curve_usd,
       category_multiplier: s.scored.category_multiplier,
       growth_pct: s.scored.growth_pct,
-      growth_multiplier: s.scored.growth_multiplier,
-      maturity_multiplier: s.scored.maturity_multiplier,
+      growth_factor: s.scored.growth_factor,
+      age_factor: s.scored.age_factor,
       age_days: s.age,
     },
     farm_steps: planJs.buildFarmSteps({
@@ -426,6 +508,7 @@ export function buildBoard(snapshot: Snapshot, constants: ModelConstants): Board
       tvl_usd: s.p.tvl_usd,
       age_days: s.age,
       low_usd: s.scored.low_usd,
+      launch_odds: s.launchOdds,
     }),
   }));
 }
@@ -450,10 +533,16 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData } {
   const { constants, calibration } = calibrate(snapshot);
-  const board = buildBoard(snapshot, constants);
+  const board = buildBoard(snapshot, constants, calibration.odds);
   const live = liveRows(snapshot);
   const audit = auditOf(snapshot, board);
+  const aside = setAsideRows(snapshot, board);
   const early = board.filter((r) => !r.on_watchlist).length;
+  const integrity: Integrity = {
+    unknown_age_rows: board.filter((r) => r.flags.includes('unknown-age')).length,
+    thin_category_rows: board.filter((r) => r.flags.includes('thin-category')).length,
+    missing_growth_rows: board.filter((r) => r.flags.includes('no-growth')).length,
+  };
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -461,6 +550,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     model: constants,
     calibration,
     audit,
+    integrity,
     model_version: MODEL_VERSION,
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
@@ -481,12 +571,15 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       implied_value_usd: row.implied_value_usd,
       low_usd: row.low_usd,
       high_usd: row.high_usd,
+      launch_odds: row.launch_odds,
       verdict: row.verdict,
       plan_cost_usd: row.plan_cost_usd,
-      growth_multiplier: row.model.growth_multiplier,
-      maturity_multiplier: row.model.maturity_multiplier,
+      flags: row.flags,
+      growth_factor: row.model.growth_factor,
+      age_factor: row.model.age_factor,
     })),
     live,
+    set_aside: aside,
   };
   return { board, radar };
 }
